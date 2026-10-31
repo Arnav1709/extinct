@@ -47,6 +47,7 @@ services:
   browser:
     build: { context: ., dockerfile: docker/browser.Dockerfile }
     image: mini-instinct-browser
+    platform: linux/amd64           # Google Chrome has no Linux arm64 build; Apple Silicon runs this under Rosetta
     env_file: [{ path: .env, required: false }]
     environment:
       TEMPORAL_ADDRESS: temporal:7233
