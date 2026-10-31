@@ -26,18 +26,21 @@ async def client():
 class FakeAgent:
     """Fake activities with the real names. `steps` = scripted model_step results; default: reply 'ok'."""
 
-    def __init__(self, steps=None, tool_seconds=0.0, fail_model=False):
+    def __init__(self, steps=None, tool_seconds=0.0, fail_model=False, start_seconds=0.0):
         self.batches, self.replies, self.tool_runs, self.texts, self.buttons, self.approved = [], [], [], [], [], []
+        self.model_calls = 0
         self.steps = list(steps or [])
         rec = self
 
         @activity.defn(name="start_turn")
         async def start_turn(batch: list[dict]) -> str:
             rec.batches.append([i.get("msg_id") or i.get("kind") for i in batch])
+            await asyncio.sleep(start_seconds)
             return f"turn-{len(rec.batches)}"
 
         @activity.defn(name="model_step")
         async def model_step(args: dict) -> dict:
+            rec.model_calls += 1
             if fail_model:
                 raise ApplicationError("model broke", non_retryable=True)
             return rec.steps.pop(0) if rec.steps else {"reply": "ok"}
@@ -162,6 +165,19 @@ async def test_stop_cancels_running_tool(client):
 
     await run_case(client, agent, body)
 
+
+async def test_stop_during_start_turn_is_not_lost(client):
+    agent = FakeAgent(steps=[calls("c1"), {"reply": "should not happen"}], start_seconds=3)
+
+    async def body(queue, wf_id):
+        await start(client, queue, wf_id, "new_message", msg(1))
+        await wait_for(lambda: agent.batches)  # debounce over, start_turn running
+        await start(client, queue, wf_id, "new_message", msg(2, stop=True))
+        await wait_for(lambda: agent.replies)
+        assert agent.replies == [("Stopped.", "stopped")]
+        assert agent.model_calls == 0 and agent.tool_runs == []
+
+    await run_case(client, agent, body)
 
 async def test_browser_tool_sends_progress_message(client):
     # Slow test (~40 s): uses the real 30 s threshold (the workflow sandbox re-imports modules, so it can't be patched).

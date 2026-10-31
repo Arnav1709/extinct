@@ -41,13 +41,12 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "proactor: run on the Proactor loop on Windows (Playwright needs subprocesses)")
 
 
-def pytest_asyncio_loop_factories(config, item):
-    # psycopg async needs the selector loop on Windows; Playwright needs Proactor. Linux: default loop.
-    if sys.platform != "win32":
-        return None
-    if item.get_closest_marker("proactor"):
-        return {"proactor": asyncio.ProactorEventLoop}
-    return {"selector": asyncio.SelectorEventLoop}
+if sys.platform == "win32":  # pytest-asyncio rejects a hook that returns None, so only define it here
+    def pytest_asyncio_loop_factories(config, item):
+        # psycopg async needs the selector loop on Windows; Playwright needs Proactor. Elsewhere: default loop.
+        if item.get_closest_marker("proactor"):
+            return {"proactor": asyncio.ProactorEventLoop}
+        return {"selector": asyncio.SelectorEventLoop}
 
 
 _migrated = False

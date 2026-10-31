@@ -1,6 +1,7 @@
 """Browser primitives + sub-agent loop, on local test pages with headless Chromium (no DB, fake model).
 Needs: python -m playwright install chromium"""
 
+import asyncio
 import functools
 import http.server
 import json
@@ -197,3 +198,20 @@ async def test_audit_hook_sees_every_action(manager, site, monkeypatch):
     model(monkeypatch, lambda text, n: [call("scroll", direction="down")] if n == 1 else [call("done", summary="ok")])
     await browser.run_browser_task("scroll once", "read", f"{site}/index.html", manager, on_action=on_action)
     assert actions == [("scroll", "ok")]
+
+
+async def test_heartbeats_continue_during_a_slow_model_call(manager, site, monkeypatch):
+    from temporalio.testing import ActivityEnvironment
+
+    async def slow_chat(kind, model_name, messages, tools=None, max_tokens=2000):
+        await asyncio.sleep(1.0)  # stands in for a model call longer than the heartbeat timeout
+        return {"message": {"role": "assistant", "content": "", "tool_calls": [call("done", summary="ok")]},
+                "finish_reason": "tool_calls"}
+
+    monkeypatch.setattr(llm, "chat", slow_chat)
+    monkeypatch.setattr(browser, "HEARTBEAT_EVERY", 0.1)
+    env, beats = ActivityEnvironment(), []
+    env.on_heartbeat = lambda *d: beats.append(d)
+    r = await env.run(browser.run_browser_task, "x", "read", f"{site}/index.html", manager)
+    assert r["status"] == "done"
+    assert len(beats) >= 5, beats  # one per step alone would be 1

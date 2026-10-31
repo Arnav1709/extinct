@@ -128,13 +128,14 @@ class ConversationWorkflow:
     async def _turn(self, batch: list[dict]) -> None:
         """start_turn -> model_step -> tools (parallel) -> model_step ... -> send_reply."""
         turn_id = None
+        self.stop = False  # reset before start_turn: a "stop" can already arrive while it runs (state is in_turn)
         try:
             turn_id = await workflow.execute_activity(activities.start_turn, batch, **AGENT)
             if not turn_id:
                 return
-            self.stop = False
             n = 1
-            step = await workflow.execute_activity(activities.model_step, {"turn_id": turn_id, "step": n}, **AGENT)
+            step = {} if self.stop else await workflow.execute_activity(
+                activities.model_step, {"turn_id": turn_id, "step": n}, **AGENT)
             while step.get("tool_calls") and n < MAX_STEPS and not self.stop:
                 self.running = [asyncio.ensure_future(self._run_tool(turn_id, c)) for c in step["tool_calls"]]
                 await asyncio.gather(*self.running, return_exceptions=True)
