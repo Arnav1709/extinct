@@ -27,6 +27,7 @@ log = logging.getLogger("browser")
 
 MAX_STEPS = 25
 ACTIONS_PER_STEP = 3
+HEARTBEAT_EVERY = 10  # seconds; one step (model call up to 120 s) can outlast the 30 s heartbeat_timeout
 TEXT_MAX = 3_000
 ELEMENTS_MAX = 150
 
@@ -229,6 +230,13 @@ def _beat(detail) -> None:
         pass  # not running inside a Temporal activity (tests, scripts)
 
 
+async def _beat_forever() -> None:
+    """Heartbeat on a timer, so a slow step never looks like a dead worker (which would retry and replay actions)."""
+    while True:
+        await asyncio.sleep(HEARTBEAT_EVERY)
+        _beat("alive")
+
+
 async def run_browser_task(goal: str, mode: str, start_url: str | None = None, manager: BrowserManager = MANAGER,
                            on_action=None) -> dict:
     """Returns {"status": "done"|"needs_user"|"failed", "summary"/"reason": str, "screenshot": bytes|None}.
@@ -239,6 +247,7 @@ async def run_browser_task(goal: str, mode: str, start_url: str | None = None, m
     keep_open = False
     log_lines: list[str] = []
     want_look, nudged = False, False
+    beats = asyncio.create_task(_beat_forever())
     try:
         if start_url and page.url in ("about:blank", ""):
             log_lines.append(f"0: goto({start_url}) -> {await act(page, 'goto', {'url': start_url})}")
@@ -292,6 +301,7 @@ async def run_browser_task(goal: str, mode: str, start_url: str | None = None, m
             step += 1
         return {"status": "failed", "reason": f"step limit ({MAX_STEPS}) reached"}
     finally:
+        beats.cancel()
         if keep_open:
             manager.takeover_page = page
         elif not page.is_closed():
