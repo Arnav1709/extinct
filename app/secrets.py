@@ -55,9 +55,10 @@ class SecretStore:
 
     def put(self, kind: str, key: str, value: bytes, meta: dict | None = None) -> None:
         ct, dk = encrypt(value, self._key, f"{kind}:{key}".encode())
-        self._db.execute(
-            "INSERT OR REPLACE INTO secrets VALUES (?, ?, ?, ?, ?, ?)",
-            (kind, key, ct, dk, json.dumps(meta or {}), datetime.now(timezone.utc).isoformat()),
+        self._db.execute(  # meta=None keeps the stored meta (a token refresh must not erase the account email)
+            "INSERT INTO secrets VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (kind, key) DO UPDATE SET value_enc = excluded.value_enc,"
+            " data_key_enc = excluded.data_key_enc, meta = COALESCE(excluded.meta, secrets.meta), updated_at = excluded.updated_at",
+            (kind, key, ct, dk, json.dumps(meta) if meta is not None else None, datetime.now(timezone.utc).isoformat()),
         )
 
     def get(self, kind: str, key: str) -> bytes | None:
@@ -78,4 +79,6 @@ class SecretStore:
 @cache
 def secret_store() -> SecretStore:
     s = get_settings()
+    if not s.master_key:
+        raise RuntimeError("MASTER_KEY is not set in this process (the browser container doesn't get it on purpose)")
     return SecretStore(s.secrets_db_path, s.master_key)

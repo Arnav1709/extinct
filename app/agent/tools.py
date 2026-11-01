@@ -183,9 +183,11 @@ def _render_email(a: dict) -> str:
 
 
 @tool("send_email",
-      "Send an email from the user's Gmail, or reply in a thread (pass reply_to_message_id). The user must approve "
-      "it with a button before it is sent; write the exact final text.",
-      {"to": {"type": "array", "items": {"type": "string", "format": "email"}, "minItems": 1, "maxItems": 5},
+      "Send an email from the user's Gmail, or reply in a thread (pass reply_to_message_id; set subject to "
+      "'Re: ' + the original subject). The user must approve it with a button before it is sent; write the exact "
+      "final text.",
+      {"to": {"type": "array", "minItems": 1, "maxItems": 5,
+              "items": {"type": "string", "format": "email", "pattern": "^[^\\s,;<>]+@[^\\s,;<>]+$"}},
        "subject": {"type": "string", "maxLength": 200},
        "body": {"type": "string", "maxLength": 5000},
        "reply_to_message_id": {"type": "string"}},
@@ -199,17 +201,19 @@ async def send_email(ctx: ToolCtx, args: dict) -> dict:
 
 def _render_browser(a: dict) -> str:
     start = a.get("start_url") or "agent decides"
-    return f"Do this in your browser:\n{a['goal']}\n(start: {start})"
+    verb = "Do this" if a["mode"] == "act" else "Look this up (read only)"
+    return f"{verb} in your browser:\n{a['goal']}\n(start: {start})"
 
 
 @tool("browser_task",
       "Use the user's own browser to do something on ANY website. mode 'read' only looks (search, read, check); "
-      "mode 'act' submits, posts, sends, buys or changes something and needs the user's approval. Give ONE clear goal, "
+      "mode 'act' submits, posts, sends, buys or changes something. Every browser task needs the user's approval "
+      "(the page it opens could leak data). Give ONE clear goal, "
       "and a start_url if you know it. If a login, CAPTCHA or 2FA blocks it, the user is asked to take over.",
       {"goal": {"type": "string", "maxLength": 500},
        "mode": {"type": "string", "enum": ["read", "act"]},
        "start_url": {"type": "string", "pattern": "^https?://"}},
-      ["goal", "mode"], tier=lambda a: "WO" if a["mode"] == "act" else "R", queue="browser",
+      ["goal", "mode"], tier="WO", queue="browser",  # read too: start_url and goal are model-chosen and could carry data to any site
       render=_render_browser, limit_key=lambda a: f"browser_task:{a['mode']}")
 async def browser_task(ctx: ToolCtx, args: dict) -> dict:
     from app import browser, telegram
@@ -232,7 +236,7 @@ async def browser_task(ctx: ToolCtx, args: dict) -> dict:
         raise ToolError(f"browser task failed: {r['reason']}")
     if r.get("screenshot"):
         await telegram.send_photo(r["screenshot"], caption=args["goal"][:200], turn_id=ctx.turn_id or None)
-    return {"status": "done", "result": untrusted_browser(r["summary"]), "user_text": r["summary"]}
+    return {"status": "done", "result": untrusted_browser(r["summary"]), "user_text": r["summary"]}  # user_text: never shown to the model
 
 
 def untrusted_browser(text: str) -> str:
@@ -247,6 +251,14 @@ def _local(dt) -> str:
     return dt.astimezone(get_settings().owner_timezone).strftime("%a %d %b %H:%M")
 
 
+MAX_TASKS = 20
+
+
+def _render_task(a: dict) -> str:
+    when = a.get("fire_at") or f"repeating '{a.get('cron')}'"
+    return f"Schedule a task I will DO by myself ({when}):\n{a['text']}"
+
+
 @tool("schedule_task",
       "Schedule something for later. kind 'remind' = send the user a reminder message with `text`. kind 'do' = at that "
       "time YOU perform `text` as an instruction (e.g. 'check Hacker News and send me the top 5'). Give fire_at (ISO 8601 "
@@ -255,7 +267,8 @@ def _local(dt) -> str:
        "text": {"type": "string", "minLength": 1, "maxLength": 300},
        "fire_at": {"type": "string"},
        "cron": {"type": "string"}},
-      ["kind", "text"], tier="WS")
+      # 'do' needs approval: its text runs later as an instruction, so an injected email must not be able to plant one
+      ["kind", "text"], tier=lambda a: "WO" if a["kind"] == "do" else "WS", render=_render_task)
 async def schedule_task(ctx: ToolCtx, args: dict) -> str:
     import secrets
     from datetime import datetime, timedelta, timezone
@@ -269,6 +282,8 @@ async def schedule_task(ctx: ToolCtx, args: dict) -> str:
 
     if bool(args.get("fire_at")) == bool(args.get("cron")):
         raise ToolError("give exactly one of fire_at (one time) or cron (repeating)")
+    if len((await list_tasks(ctx, {}))["tasks"]) >= MAX_TASKS:
+        raise ToolError(f"there are already {MAX_TASKS} tasks or approvals waiting; cancel some first")
     task_id = f"task-{secrets.token_hex(4)}"
     task = {"id": task_id, "kind": args["kind"], "text": args["text"]}
     client = await temporal()

@@ -78,3 +78,18 @@ def test_values_of_kind(store):
     store.put("site", "b", b"pw-b")
     store.put("oauth", "google", b"tok")
     assert sorted(store.values_of_kind("site")) == [b"pw-a", b"pw-b"]
+
+
+def test_store_refuses_to_open_without_master_key(monkeypatch):
+    from app import secrets
+    from app.config import get_settings
+
+    monkeypatch.delenv("MASTER_KEY")
+    get_settings.cache_clear()
+    secrets.secret_store.cache_clear()
+    try:
+        with pytest.raises(RuntimeError, match="MASTER_KEY is not set"):
+            secrets.secret_store()
+    finally:
+        get_settings.cache_clear()
+        secrets.secret_store.cache_clear()

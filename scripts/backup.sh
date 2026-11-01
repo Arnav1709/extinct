@@ -5,6 +5,7 @@
 #     and temporal-data (workflow state + your scheduled tasks). The browser profile is skipped (just log in again).
 # Usage (Git Bash or WSL, from the project folder):  sh scripts/backup.sh
 set -e
+umask 077  # backups hold your messages and email content: readable by you only
 cd "$(dirname "$0")/.."
 DATABASE_URL=$(grep -E '^DATABASE_URL=' .env | cut -d= -f2-)
 [ -n "$DATABASE_URL" ] || { echo "DATABASE_URL missing in .env"; exit 1; }
@@ -13,11 +14,14 @@ mkdir -p "$DEST"
 export MSYS_NO_PATHCONV=1  # Git Bash: don't rewrite container paths
 
 echo "1/3 Supabase schema app..."
-docker run --rm -e "DB=$DATABASE_URL" postgres:17-alpine sh -c 'pg_dump --schema=app --no-owner "$DB"' | gzip > "$DEST/app.sql.gz"
+# DB=... before docker (not -e "DB=$URL"): keeps the password out of the process list
+DB="$DATABASE_URL" docker run --rm -e DB postgres:17-alpine sh -c 'pg_dump --schema=app --no-owner "$DB"' | gzip > "$DEST/app.sql.gz"
+gunzip -c "$DEST/app.sql.gz" | grep -q 'PostgreSQL database dump complete' || { echo "pg_dump failed: $DEST/app.sql.gz is incomplete"; exit 1; }
 
 for vol in secrets temporal-data; do
   echo "volume $vol..."
   docker run --rm -v "extinct_$vol:/v:ro" -v "$(pwd)/$DEST:/b" alpine tar czf "/b/$vol.tgz" -C /v .
 done
+chmod 600 "$DEST"/*  # the tar files are written by a container, outside our umask
 echo "Done: $DEST"
 echo "Restore: gunzip -c $DEST/app.sql.gz | psql \"\$DATABASE_URL\"  ·  volumes: tar xzf into a fresh volume (see README)."

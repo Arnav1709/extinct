@@ -160,7 +160,22 @@ async def test_send_reply_threads_correctly(appdb, monkeypatch):
     body = [kw for name, kw in svc.log if name == "send"][0]["body"]
     mime = message_from_bytes(base64.urlsafe_b64decode(body["raw"]))
     assert body["threadId"] == "t1" and mime["In-Reply-To"] == "<abc@amazon>"
-    assert mime["Subject"] == "Re: Shipped!" and mime["To"] == "ship@amazon.in"
+    # exactly the subject the user approved: the original email's subject must not replace it unseen
+    assert mime["Subject"] == "thanks" and mime["To"] == "ship@amazon.in"
+
+
+async def test_recipients_must_be_single_addresses(appdb):
+    await appdb.execute("INSERT INTO connections (provider, status, scopes) VALUES ('google', 'connected', %s)", ([RO, SEND],))
+    for to in (["a@x.com, evil@y.com"], ["a@x.com;evil@y.com"], ["Bob <evil@y.com>"], ["not-an-address"]):
+        args = {"to": to, "subject": "s", "body": "b"}
+        assert isinstance(await guard.check("send_email", json.dumps(args), ["send_email"]), guard.Denied), to
+
+
+async def test_outgoing_email_with_a_secret_is_refused(appdb):
+    await appdb.execute("INSERT INTO connections (provider, status, scopes) VALUES ('google', 'connected', %s)", ([RO, SEND],))
+    args = {"to": ["a@x.com"], "subject": "s", "body": "here you go: YA29.a0AfH6SMBxyz1234567890"}
+    d = await guard.check("send_email", json.dumps(args), ["send_email"])
+    assert isinstance(d, guard.Denied) and "secret" in d.reason
 
 
 async def test_send_email_needs_approval_with_full_text(appdb):

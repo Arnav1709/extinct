@@ -12,7 +12,7 @@ CTX = ToolCtx("t", "c")
 def outbox(monkeypatch):
     sent = []
 
-    async def fake_send(text, reply_markup=None, turn_id=None):
+    async def fake_send(text, reply_markup=None, turn_id=None, plain=False):
         sent.append(text)
         return [1]
 

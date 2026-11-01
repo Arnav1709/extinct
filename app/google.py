@@ -97,7 +97,9 @@ async def revoke() -> None:
     if raw:
         token = json.loads(raw).get("refresh_token") or json.loads(raw).get("token")
         async with httpx.AsyncClient(timeout=20) as client:
-            await client.post("https://oauth2.googleapis.com/revoke", params={"token": token})
+            r = await client.post("https://oauth2.googleapis.com/revoke", data={"token": token})
+        if r.status_code != 200 and "invalid_token" not in r.text:  # invalid_token: already revoked or expired
+            r.raise_for_status()  # keep the local token: the grant is still live at Google
     secret_store().delete("oauth", "google")
     await _mark("revoked")
 
@@ -204,11 +206,10 @@ async def send_email(to: list[str], subject: str, body: str, reply_to_message_id
     thread_id, in_reply_to, refs = None, "", ""
     if reply_to_message_id:
         orig = await run(svc.users().messages().get(userId="me", id=reply_to_message_id, format="metadata",
-                                                     metadataHeaders=["Message-ID", "References", "Subject"]))
+                                                     metadataHeaders=["Message-ID", "References"]))
         h = _headers(orig)
         thread_id, in_reply_to, refs = orig.get("threadId"), h.get("message-id", ""), h.get("references", "")
-        if not subject.lower().startswith("re:"):
-            subject = f"Re: {h.get('subject', subject)}"
+        # The subject is sent exactly as the user approved it (it used to be swapped for "Re: <original>").
     raw = base64.urlsafe_b64encode(build_message(to, subject, body, "", in_reply_to, refs).as_bytes()).decode()
     payload = {"raw": raw, **({"threadId": thread_id} if thread_id else {})}
     sent = await run(svc.users().messages().send(userId="me", body=payload))

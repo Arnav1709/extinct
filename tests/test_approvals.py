@@ -10,7 +10,7 @@ from app.agent.tools import TOOLS, Tool
 def tg(monkeypatch):
     log = {"sent": [], "edits": []}
 
-    async def fake_send(text, reply_markup=None, turn_id=None):
+    async def fake_send(text, reply_markup=None, turn_id=None, plain=False):
         log["sent"].append((text, reply_markup))
         return [900 + len(log["sent"])]
 
@@ -118,3 +118,29 @@ async def test_garbage_button_data_is_ignored(appdb, tg):
     assert await activities.claim_approval({"data": "hello"}) == {}
     assert await activities.claim_approval({"data": "appr:not-a-uuid:y"}) == {}
     assert await activities.claim_approval({"data": "take:x"}) == {}
+
+
+async def test_retry_after_crash_mid_action_does_not_run_it_again(appdb, tg, risky_tool, monkeypatch):
+    _, appr = await ask(appdb, tg, risky_tool)
+    claim = await activities.claim_approval({"data": f"appr:{appr['id']}:y"})
+    real_audit = activities.guard.audit
+
+    async def audit_then_crash(tool, decision, **kw):
+        if decision == "executed":
+            raise ConnectionError("db went away")  # the email was sent, then the activity crashed
+        await real_audit(tool, decision, **kw)
+
+    monkeypatch.setattr(activities.guard, "audit", audit_then_crash)
+    with pytest.raises(ConnectionError):
+        await activities.run_approved(claim["approval_id"])
+    monkeypatch.setattr(activities.guard, "audit", real_audit)
+    await activities.run_approved(claim["approval_id"])  # Temporal's retry
+    assert risky_tool == [{"to": "john@x.com"}]  # sent once, not twice
+    assert "may or may not have gone through" in tg["edits"][-1][1]
+    assert (await appdb.fetchone("SELECT status FROM approvals"))["status"] == "failed"
+
+
+async def test_unknown_button_choice_does_not_approve(appdb, tg, risky_tool):
+    _, appr = await ask(appdb, tg, risky_tool)
+    assert await activities.claim_approval({"data": f"appr:{appr['id']}:x"}) == {}
+    assert (await appdb.fetchone("SELECT status FROM approvals"))["status"] == "pending"

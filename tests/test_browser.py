@@ -34,7 +34,7 @@ async def manager(tmp_path, monkeypatch):
     monkeypatch.setenv("BROWSER_HEADLESS", "true")
     monkeypatch.setenv("BROWSER_PROFILE_DIR", str(tmp_path / "profile"))
     get_settings.cache_clear()
-    m = browser.BrowserManager()
+    m = browser.BrowserManager(block_internal=False)  # the test site is on 127.0.0.1
     try:
         await m.context()
     except Exception as e:
@@ -101,12 +101,12 @@ async def test_profile_persists_across_restarts(tmp_path, monkeypatch, site):
     monkeypatch.setenv("BROWSER_PROFILE_DIR", str(tmp_path / "p"))
     get_settings.cache_clear()
     try:
-        m1 = browser.BrowserManager()
+        m1 = browser.BrowserManager(block_internal=False)
         page = await m1.agent_page()
         await page.goto(f"{site}/index.html")
         await page.evaluate("localStorage.setItem('session', 'logged-in')")
         await m1.close()
-        m2 = browser.BrowserManager()   # "container restart"
+        m2 = browser.BrowserManager(block_internal=False)   # "container restart"
         page = await m2.agent_page()
         await page.goto(f"{site}/index.html")
         assert await page.evaluate("localStorage.getItem('session')") == "logged-in"
@@ -215,3 +215,53 @@ async def test_heartbeats_continue_during_a_slow_model_call(manager, site, monke
     r = await env.run(browser.run_browser_task, "x", "read", f"{site}/index.html", manager)
     assert r["status"] == "done"
     assert len(beats) >= 5, beats  # one per step alone would be 1
+
+
+async def test_read_mode_cannot_type_or_leave_the_site(manager, site, monkeypatch):
+    other = site.replace("127.0.0.1", "localhost")  # same server, different site
+
+    def decide(text, n):
+        if n == 1:
+            return [call("goto", url=f"{other}/form.html?leak=secret")]
+        if n == 2:
+            return [call("type", id=1, text="x")]
+        return [call("done", summary="ok")]
+
+    seen = model(monkeypatch, decide)
+    r = await browser.run_browser_task("x", "read", f"{site}/form.html", manager)
+    assert r["status"] == "done"
+    assert "type" not in seen[0]["tools"]
+    assert "read mode stays on" in seen[1]["text"] and "127.0.0.1" in seen[1]["text"]  # page never left the site
+    assert "type(" in seen[2]["text"] and "not allowed in read mode" in seen[2]["text"]
+
+
+async def test_read_mode_blocks_requests_that_send_data(manager, site):
+    page = await manager.agent_page()
+    await page.goto(f"{site}/index.html")
+    await page.route("**/*", browser._get_only)
+    post = "fetch('/index.html', {method: 'POST', body: 'x'}).then(r => 'sent').catch(() => 'blocked')"
+    assert await page.evaluate(post) == "blocked"
+    assert await page.evaluate("fetch('/index.html').then(r => r.status)") == 200  # reading still works
+
+
+@pytest.mark.parametrize("host,internal", [
+    ("temporal", True), ("localhost", True), ("host.docker.internal", True), ("127.0.0.1", True),
+    ("10.0.0.5", True), ("192.168.1.1", True), ("169.254.169.254", True), ("100.100.1.1", True),
+    ("[::1]", True), ("::ffff:127.0.0.1", True), ("1.1.1.1", False), ("8.8.8.8", False),
+])
+async def test_internal_hosts_are_recognised(host, internal):
+    assert await browser.is_internal(host) is internal
+
+
+async def test_browser_refuses_internal_addresses(tmp_path, monkeypatch, site):
+    monkeypatch.setenv("BROWSER_CHANNEL", "chromium")
+    monkeypatch.setenv("BROWSER_HEADLESS", "true")
+    monkeypatch.setenv("BROWSER_PROFILE_DIR", str(tmp_path / "p"))
+    get_settings.cache_clear()
+    m = browser.BrowserManager()  # blocking on, as in production
+    try:
+        page = await m.agent_page()
+        result = await browser.act(page, "goto", {"url": f"{site}/index.html"})  # the test site is on 127.0.0.1
+        assert result.startswith("error:") and "BLOCKED_BY_CLIENT" in result
+    finally:
+        await m.close()

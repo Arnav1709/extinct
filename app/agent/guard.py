@@ -55,7 +55,7 @@ async def check(name: str, raw_args: str | dict, menu: list[str], approved: bool
     if not isinstance(args, dict):
         return Denied("arguments must be a JSON object")
     try:
-        jsonschema.validate(args, tool.schema)
+        jsonschema.validate(args, tool.schema, format_checker=jsonschema.FormatChecker())
     except jsonschema.ValidationError as e:
         return Denied(f"invalid arguments: {e.message}")
     if tool.needs and not need_met(tool.needs, await load_connections()):
@@ -70,6 +70,8 @@ async def check(name: str, raw_args: str | dict, menu: list[str], approved: bool
             return Denied(f"daily limit reached for {key} ({DAILY_LIMITS[key]}/day)")
 
     tier = tool.tier_for(args)
+    if tier in APPROVAL_TIERS and (reason := leaks(json.dumps(args, ensure_ascii=False))):
+        return Denied(f"blocked: the arguments look like they contain a secret ({reason})")  # G5 on what goes OUT
     if tier in APPROVAL_TIERS and not approved:
         summary = tool.render(args) if tool.render else f"{name}: {json.dumps(args, ensure_ascii=False)}"
         return NeedsApproval(args, tier, summary)
@@ -86,13 +88,14 @@ async def audit(tool: str, decision: str, *, turn_id: str | None = None, tier: s
 
 # ---------------------------------------------------------------- G5: outbound leak check
 
-_LEAK_PATTERNS = [
-    re.compile(r"ya29\.[\w-]{10,}"),            # Google access token
-    re.compile(r"1//0[\w-]{10,}"),               # Google refresh token
-    re.compile(r"sk-or-v1-[0-9a-f]{20,}"),       # OpenRouter key
-    re.compile(r"\b\d{8,10}:[A-Za-z0-9_-]{35}\b"),  # Telegram bot token
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
-]
+_LEAK_PATTERNS = [re.compile(p, re.I) for p in (  # any case: "YA29." must not slip through
+    r"ya29\.[\w-]{10,}",                # Google access token
+    r"1//0[\w-]{10,}",                   # Google refresh token
+    r"sk-or-v1-[0-9a-f]{20,}",           # OpenRouter key
+    r"nvapi-[\w-]{20,}",                 # NVIDIA API key
+    r"\b\d{8,10}:[A-Za-z0-9_-]{35}\b",   # Telegram bot token
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
+)]
 
 
 def leaks(text: str, saved_secrets: list[bytes] = ()) -> str | None:

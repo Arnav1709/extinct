@@ -49,6 +49,14 @@ if sys.platform == "win32":  # pytest-asyncio rejects a hook that returns None, 
         return {"selector": asyncio.SelectorEventLoop}
 
 
+@pytest.fixture(autouse=True)
+def _fresh_settings():
+    """Settings are cached; tests that monkeypatch env (e.g. TELEGRAM_DRY_RUN) must not leak into later tests."""
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
 _migrated = False
 
 

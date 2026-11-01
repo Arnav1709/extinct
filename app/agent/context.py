@@ -3,6 +3,7 @@
 G2: this module never reads secrets (a test enforces that it doesn't import app.secrets).
 """
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -17,7 +18,10 @@ MESSAGE_MAX_CHARS = 1_500
 
 def untrusted(source: str, text: str) -> str:
     """Wrap third-party text (emails, web pages) so the model treats it as data, never instructions."""
-    safe = text.replace("</untrusted", "<\\/untrusted")
+    # Neutralise anything that looks like one of our own tags (any case, any spacing), so the text can't close
+    # this wrapper or fake a section like <new_messages>.
+    safe = re.sub(r"<\s*/?\s*(untrusted|new_messages|recent_messages|events|facts|now|connections)\b",
+                  lambda m: "&lt;" + m.group(0)[1:], text, flags=re.I)
     return f'<untrusted source="{source}">\n{safe}\n</untrusted>'
 
 
@@ -85,7 +89,8 @@ def render(d: TurnData) -> str:
 async def _event_text(item: dict) -> str:
     kind = item.get("kind")
     if kind == "task_due":
-        return f"Scheduled task [{item['task_id']}] is due now. Do it and report the result: {item['text']}"
+        return (f"Scheduled task [{item['task_id']}] is due now (the user approved it when it was scheduled). "
+                f"Do it and report the result: {item['text']}")
     if kind == "takeover_done":
         row = await db.fetchone("SELECT input FROM approvals WHERE id = %s", (item["approval_id"],))
         task = (row or {}).get("input", {})
