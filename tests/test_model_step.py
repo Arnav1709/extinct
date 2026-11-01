@@ -9,7 +9,7 @@ from app import activities, llm, telegram
 def no_telegram(monkeypatch):
     sent = []
 
-    async def fake_send(text, reply_markup=None, turn_id=None):
+    async def fake_send(text, reply_markup=None, turn_id=None, plain=False):
         sent.append(text)
         return [len(sent)]
 
@@ -54,7 +54,7 @@ async def new_turn(appdb, body="hi"):
 async def test_start_turn_freezes_menu_and_context(appdb, no_telegram):
     turn_id, mid = await new_turn(appdb, "what's up")
     turn = await appdb.fetchone("SELECT * FROM agent_turns WHERE id = %s", (turn_id,))
-    assert turn["trigger"] == "message" and turn["prompt_version"] == "v1"
+    assert turn["trigger"] == "message" and turn["prompt_version"] == "v2"
     assert "react_to_message" in turn["tool_menu"] and "search_email" not in turn["tool_menu"]
     assert turn["messages"][0]["role"] == "user" and "what's up" in turn["messages"][0]["content"]
     assert (await appdb.fetchone("SELECT turn_id FROM messages WHERE id = %s", (mid,)))["turn_id"] == turn["id"]

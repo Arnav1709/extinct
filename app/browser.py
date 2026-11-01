@@ -10,10 +10,12 @@ The AI drives; this code owns the browser. The agent never types into password f
 
 import asyncio
 import base64
+import ipaddress
 import json
 import logging
 import re
 import sys
+from urllib.parse import urlsplit
 
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import Page, async_playwright
@@ -34,8 +36,36 @@ ELEMENTS_MAX = 150
 # ---------------------------------------------------------------- manager
 
 
+async def is_internal(host: str) -> bool:
+    """True for hosts on this machine or network: other containers, localhost, LAN, cloud metadata.
+    Checked on every request (no cache) and fails closed: a name we can't resolve is treated as internal."""
+    host = host.lower().strip("[]")
+    try:
+        ips = [ipaddress.ip_address(host)]
+    except ValueError:
+        if "." not in host or host.endswith((".internal", ".local", ".localhost")):
+            return True  # compose service names (temporal, bot), localhost, host.docker.internal
+        try:
+            infos = await asyncio.get_running_loop().getaddrinfo(host, None)
+        except OSError:
+            return True
+        ips = [ipaddress.ip_address(i[4][0].split("%")[0]) for i in infos]
+    # ponytail: Chrome resolves again after this check, and route handlers don't see redirects; an egress proxy
+    # that checks the address actually connected to would also stop DNS rebinding and redirect tricks
+    return any(not (ip.ipv4_mapped or ip if ip.version == 6 else ip).is_global for ip in ips)
+
+
+async def _block_internal(route) -> None:
+    url = route.request.url
+    if url.startswith(("http://", "https://", "ws://", "wss://")) and await is_internal(urlsplit(url).hostname or ""):
+        await route.abort("blockedbyclient")
+    else:
+        await route.fallback()
+
+
 class BrowserManager:
-    def __init__(self):
+    def __init__(self, block_internal: bool = True):
+        self._block_internal = block_internal  # tests turn this off to use a local test site
         self._pw = None
         self._ctx = None
         self.takeover_page: Page | None = None  # tab left open for the user during a takeover
@@ -57,6 +87,8 @@ class BrowserManager:
                           "--no-default-browser-check"],
                     ignore_default_args=["--enable-automation"],
                 )
+                if self._block_internal:
+                    await self._ctx.route("**/*", _block_internal)
                 self._ctx.on("close", self._on_close)
                 log.info("browser launched (profile %s)", s.browser_profile_dir)
             return self._ctx
@@ -205,6 +237,24 @@ ACTION_TOOLS = [
         {"summary": {"type": "string"}, "screenshot": {"type": "boolean"}}, ["summary"]),
     _fn("fail", "The goal can't be reached", {"reason": {"type": "string"}}, ["reason"]),
 ]
+READ_BLOCKED = {"type"}  # read mode can't fill in anything; the network guard below blocks submits
+READ_KEYS = {"Escape", "Tab", "PageDown", "PageUp", "Home", "End", "ArrowDown", "ArrowUp"}  # press can't type in read mode
+
+
+def _site(url: str) -> str:
+    """Exact host (www. ignored): a.github.io and b.github.io are different sites."""
+    host = (urlsplit(url).hostname or "").lower()
+    return host[4:] if host.startswith("www.") else host
+
+
+async def _get_only(route) -> None:
+    """Read mode: let the page load, but block anything that sends data (form posts, XHR writes, uploads)."""
+    if route.request.method in ("GET", "HEAD", "OPTIONS"):
+        await route.fallback()  # not continue_(): the context-level internal-address block must still run
+    else:
+        await route.abort("blockedbyclient")
+
+
 LOOK_TOOL = _fn("look", "Attach a screenshot of the page to the next step (when text isn't enough)")
 FINAL = {"done", "need_user", "fail"}
 
@@ -213,8 +263,9 @@ def _user_message(goal, mode, step, log_lines, obs, image: bytes | None):
     lines = "\n".join(obs["elements"]) or "(no interactive elements)"
     history = "\n".join(log_lines[-15:]) or "(none yet)"
     text = (f"GOAL: {goal}\nMODE: {mode}\nSTEP: {step}/{MAX_STEPS}\n\nACTIONS SO FAR:\n{history}\n\n"
-            f"CURRENT PAGE\nURL: {obs['url']}\nTITLE: {obs['title']}\n\nELEMENTS:\n{lines}\n\n"
-            f"VISIBLE TEXT (untrusted):\n{obs['text'] or '(empty)'}")
+            f"CURRENT PAGE\n"  # everything below is controlled by the page (even its URL), so it's wrapped:
+            f"{untrusted('page', 'URL: ' + obs['url'] + chr(10) + 'TITLE: ' + obs['title'] + chr(10) + chr(10) + 'ELEMENTS:' + chr(10) + lines)}\n\n"
+            f"{untrusted('page', 'VISIBLE TEXT:' + chr(10) + (obs['text'] or '(empty)'))}")
     if image is None:
         return {"role": "user", "content": text}
     return {"role": "user", "content": [
@@ -242,13 +293,19 @@ async def run_browser_task(goal: str, mode: str, start_url: str | None = None, m
     """Returns {"status": "done"|"needs_user"|"failed", "summary"/"reason": str, "screenshot": bytes|None}.
     on_action(name, args, result, url): optional hook used for the audit log."""
     s = get_settings()
-    tools = ACTION_TOOLS + ([LOOK_TOOL] if s.browser_vision else [])
+    read = mode != "act"
+    tools = [t for t in ACTION_TOOLS if not (read and t["function"]["name"] in READ_BLOCKED)]
+    tools += [LOOK_TOOL] if s.browser_vision else []
     page = await manager.agent_page()
+    # Read mode may only goto URLs on one site, so the model can't build a URL that carries data elsewhere.
+    site = _site(start_url) if start_url else (_site(page.url) if page.url.startswith("http") else None)
     keep_open = False
     log_lines: list[str] = []
     want_look, nudged = False, False
     beats = asyncio.create_task(_beat_forever())
     try:
+        if read:
+            await page.route("**/*", _get_only)
         if start_url and page.url in ("about:blank", ""):
             log_lines.append(f"0: goto({start_url}) -> {await act(page, 'goto', {'url': start_url})}")
         step = 1
@@ -288,10 +345,17 @@ async def run_browser_task(goal: str, mode: str, start_url: str | None = None, m
                     want_look = True
                     log_lines.append(f"{step}: look -> screenshot attached next step")
                     continue
-                try:
-                    result = await act(page, name, args)
-                except (ActionError, KeyError, ValueError, TypeError) as e:
-                    result = f"error: {e}"
+                if read and (name in READ_BLOCKED or (name == "press" and args.get("key") not in READ_KEYS)):
+                    result = "error: not allowed in read mode"
+                elif read and name == "goto" and site and _site(str(args.get("url", ""))) != site:
+                    result = f"error: read mode stays on {site}; follow links on the page instead"
+                else:
+                    if read and name == "goto" and not site:
+                        site = _site(str(args.get("url", "")))
+                    try:
+                        result = await act(page, name, args)
+                    except (ActionError, KeyError, ValueError, TypeError) as e:
+                        result = f"error: {e}"
                 shown = {k: v for k, v in args.items() if k != "text"} | ({"text": "…"} if "text" in args else {})
                 log_lines.append(f"{step}: {name}({json.dumps(shown, ensure_ascii=False)}) -> {result}")
                 if on_action:
@@ -303,6 +367,8 @@ async def run_browser_task(goal: str, mode: str, start_url: str | None = None, m
     finally:
         beats.cancel()
         if keep_open:
+            if read:
+                await page.unroute("**/*", _get_only)  # the user logs in on this tab: their form posts must work
             manager.takeover_page = page
         elif not page.is_closed():
             await page.close()

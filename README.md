@@ -50,7 +50,7 @@ docker compose run --rm worker-agent python -m scripts.usage     # free AI quota
 docker compose down                       # stop (your data is kept)
 sh scripts/backup.sh                      # backup into ./backup/<date>/ (T-36)
 ```
-- Temporal UI (workflows, timers, scheduled tasks): http://localhost:8233
+- Workflows and one-time tasks: `docker compose exec temporal temporal --address 127.0.0.1:7233 workflow list`; repeating tasks: `... schedule list` (the Web UI is off: it had no login)
 - Live browser: http://localhost:6080/vnc.html
 - Every port is bound to `127.0.0.1`, so nothing is reachable from your network.
 

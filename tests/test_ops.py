@@ -39,6 +39,8 @@ async def test_wipe_needs_exact_confirmation(appdb):
 
 async def test_eval_runner_with_fake_model(appdb, monkeypatch, capsys):
     from app import llm, telegram
+
+    monkeypatch.setenv("TELEGRAM_DRY_RUN", "true")  # the script sets this on import; let monkeypatch undo it after
     from scripts import eval_scenarios
 
     async def chat(kind, model, messages, tools=None, max_tokens=2000):

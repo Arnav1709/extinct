@@ -33,7 +33,7 @@ def fooled_model(monkeypatch):
         sent_emails.append(a)
         return {"sent": True}
 
-    async def fake_send(text, reply_markup=None, turn_id=None):
+    async def fake_send(text, reply_markup=None, turn_id=None, plain=False):
         tg.append((text, reply_markup))
         return [1]
 

@@ -148,11 +148,11 @@ async def record_out(body: str, tg_message_id: int | None, kind: str = "text", t
     )
 
 
-async def _send_one(text: str, reply_markup: dict | None) -> int:
+async def _send_one(text: str, reply_markup: dict | None, plain: bool = False) -> int:
     if get_settings().telegram_dry_run:
         return next(_fake_ids)
-    params = {"chat_id": _owner(), "text": to_telegram_html(text), "parse_mode": "HTML",
-              "link_preview_options": {"is_disabled": True}}
+    params = {"chat_id": _owner(), "text": text if plain else to_telegram_html(text),
+              "link_preview_options": {"is_disabled": True}, **({} if plain else {"parse_mode": "HTML"})}
     if reply_markup:
         params["reply_markup"] = reply_markup
     try:
@@ -160,18 +160,21 @@ async def _send_one(text: str, reply_markup: dict | None) -> int:
     except Permanent as e:
         if "parse entities" not in str(e):
             raise
+        if plain:
+            raise
         params.pop("parse_mode")  # our HTML was rejected: send it plain rather than not at all
         params["text"] = text
         msg = await api("sendMessage", **params)
     return msg["message_id"]
 
 
-async def send(text: str, reply_markup: dict | None = None, turn_id: str | None = None) -> list[int]:
-    """Send text (split into bubbles). Buttons, if any, go on the last bubble. Returns message ids."""
+async def send(text: str, reply_markup: dict | None = None, turn_id: str | None = None, plain: bool = False) -> list[int]:
+    """Send text (split into bubbles). Buttons, if any, go on the last bubble. Returns message ids.
+    plain=True: no formatting, so what you read is exactly the text (approval prompts: a [label](url) can't hide a URL)."""
     chunks = split_bubbles(text)
     ids = []
     for i, chunk in enumerate(chunks):
-        mid = await _send_one(chunk, reply_markup if i == len(chunks) - 1 else None)
+        mid = await _send_one(chunk, reply_markup if i == len(chunks) - 1 else None, plain)
         await record_out(chunk, mid, "text", turn_id)
         ids.append(mid)
     return ids
@@ -211,11 +214,10 @@ async def answer_callback(callback_id: str, text: str | None = None) -> None:
 
 
 async def edit_message_text(message_id: int, text: str) -> None:
-    """Replace a message's text and remove its buttons."""
+    """Replace a message's text and remove its buttons. Plain text: it's only used for approval prompts."""
     if not get_settings().telegram_dry_run:
         try:
-            await api("editMessageText", chat_id=_owner(), message_id=message_id,
-                      text=to_telegram_html(text), parse_mode="HTML")
+            await api("editMessageText", chat_id=_owner(), message_id=message_id, text=text)
         except Permanent as e:
             if "message is not modified" not in str(e):
                 raise

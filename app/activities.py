@@ -155,7 +155,7 @@ async def request_approval(turn_id: str | None, tool: str, args: dict, summary: 
     else:
         yes = "Send" if tool == "send_email" else "Do it"
         markup = telegram.buttons((yes, f"appr:{aid}:y"), ("Cancel", f"appr:{aid}:n"))
-    [*_, mid] = await telegram.send(summary, reply_markup=markup, turn_id=turn_id)
+    [*_, mid] = await telegram.send(summary, reply_markup=markup, turn_id=turn_id, plain=True)
     await db.execute("UPDATE approvals SET tg_message_id = %s WHERE id = %s", (mid, aid))
     return aid
 
@@ -188,13 +188,20 @@ async def run_tool(args: dict) -> dict:
         await _store_result(turn_id, call, {"error": decision.reason}, True)
         return {"ok": False}
     if isinstance(decision, guard.NeedsApproval):
-        await guard.audit(call["name"], "needs_approval", turn_id=turn_id, tier=decision.tier)
-        await request_approval(turn_id, call["name"], decision.args, decision.summary)
+        # A retry (e.g. the prompt was sent, then storing the result failed) must not send a second prompt:
+        # two pending approvals for one call could run the action twice.
+        if not await db.fetchone(
+                "SELECT 1 FROM approvals WHERE turn_id = %s AND tool = %s AND input = %s::jsonb AND status = 'pending'",
+                (turn_id, call["name"], json.dumps(decision.args))):
+            await guard.audit(call["name"], "needs_approval", turn_id=turn_id, tier=decision.tier)
+            await request_approval(turn_id, call["name"], decision.args, decision.summary)
         await _store_result(turn_id, call, {"status": "approval_requested",
                                             "note": "Not executed yet. The user must tap the button."})
         return {"ok": True}
 
     content, is_error = await execute_tool(turn_id, call["id"], call["name"], decision.args, decision.tier)
+    if isinstance(content, dict):  # user_text is the raw (unwrapped) copy for the user, never for the model
+        content = {k: v for k, v in content.items() if k != "user_text"}
     await _store_result(turn_id, call, content, is_error)
     return {"ok": not is_error}
 
@@ -260,6 +267,8 @@ async def claim_approval(args: dict) -> dict:
             await guard.audit(row["tool"], "rejected", actor="user", detail={"approval_id": aid})
             await _edit(row["tg_message_id"], f"{row['summary']}\n\n✗ Cancelled")
         return {}
+    if choice != "y":
+        return {}
     row = await db.fetchone(
         "UPDATE approvals SET status = 'executing', decided_at = now()"
         " WHERE id = %s AND status = 'pending' AND expires_at > now() RETURNING tool", (aid,))
@@ -282,6 +291,13 @@ async def _edit(message_id: int | None, text: str) -> None:
 async def run_approved(approval_id: str) -> None:
     """Execute an action the user approved with a real button tap (re-checking the guard first)."""
     row = await db.fetchone("SELECT * FROM approvals WHERE id = %s", (approval_id,))
+    if row and row["status"] == "running":
+        # A previous attempt started the action and then crashed: it may already have happened. Never redo it.
+        await db.execute("UPDATE approvals SET status = 'failed', result = %s WHERE id = %s AND status = 'running'",
+                         (json.dumps({"error": "interrupted, outcome unknown"}), approval_id))
+        await _edit(row["tg_message_id"], f"{row['summary']}\n\n⚠ Interrupted: it may or may not have gone through. "
+                                          "Please check before asking again.")
+        return
     if not row or row["status"] != "executing":
         return  # already finished (retry) or never claimed
     decision = await guard.check(row["tool"], row["input"], menu_for(await load_connections()), approved=True)
@@ -291,6 +307,9 @@ async def run_approved(approval_id: str) -> None:
                          (json.dumps({"error": reason}), approval_id))
         await _edit(row["tg_message_id"], f"{row['summary']}\n\n✗ Couldn't do it: {reason}")
         return
+    if not await db.fetchone("UPDATE approvals SET status = 'running' WHERE id = %s AND status = 'executing' RETURNING id",
+                             (approval_id,)):
+        return  # another attempt claimed it first
     content, is_error = await execute_tool(str(row["turn_id"]) if row["turn_id"] else None, f"approval:{approval_id}",
                                            row["tool"], decision.args, decision.tier)
     await db.execute("UPDATE approvals SET status = %s, result = %s WHERE id = %s",
@@ -316,4 +335,5 @@ async def fire_task(task: dict) -> None:
         await telegram.send(f"⏰ {task['text']}")
     else:
         from app.dispatch import signal_event
-        await signal_event({"kind": "task_due", "task_id": task["id"], "text": task["text"]})
+        await signal_event({"kind": "task_due", "task_id": task["id"], "text": task["text"],
+                            "approved": task.get("approved", False)})

@@ -13,7 +13,7 @@ from app.agent.tools import TOOLS, ToolCtx, ToolError
 def tg(monkeypatch):
     out = {"sent": [], "photos": [], "edits": []}
 
-    async def send(text, reply_markup=None, turn_id=None):
+    async def send(text, reply_markup=None, turn_id=None, plain=False):
         out["sent"].append((text, reply_markup))
         return [500 + len(out["sent"])]
 
@@ -74,9 +74,11 @@ async def test_needs_user_sends_live_view_link_and_done_button(appdb, tg, monkey
     assert claim["event"]["kind"] == "takeover_done"
 
 
-async def test_act_mode_needs_approval_read_mode_does_not(appdb):
+async def test_every_browser_task_needs_approval(appdb):
     menu = ["browser_task"]
-    assert isinstance(await guard.check("browser_task", json.dumps({"goal": "read HN", "mode": "read"}), menu), guard.Allowed)
+    d = await guard.check("browser_task", json.dumps({"goal": "read HN", "mode": "read"}), menu)
+    assert isinstance(d, guard.NeedsApproval)  # read too: its URL could carry data to any site
+    assert d.summary == "Look this up (read only) in your browser:\nread HN\n(start: agent decides)"
     d = await guard.check("browser_task", json.dumps({"goal": "post 'hi' on X", "mode": "act", "start_url": "https://x.com"}), menu)
     assert isinstance(d, guard.NeedsApproval)
     assert d.summary == "Do this in your browser:\npost 'hi' on X\n(start: https://x.com)"

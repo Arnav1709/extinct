@@ -18,7 +18,6 @@ REQUIRED = (
     "TELEGRAM_BOT_TOKEN",
     "TELEGRAM_OWNER_ID",
     "DATABASE_URL",
-    "MASTER_KEY",
     "LLM_API_KEY",
     "MODEL_MAIN",
 )
@@ -33,7 +32,7 @@ class Settings:
     telegram_bot_token: str
     telegram_owner_id: int
     database_url: str
-    master_key: bytes
+    master_key: bytes | None  # None in the browser container, which must not be able to decrypt secrets
     llm_api_key: str
     model_main: str
     model_browser: str
@@ -106,7 +105,7 @@ def load(env: Mapping[str, str] = os.environ) -> Settings:
         telegram_bot_token=get("TELEGRAM_BOT_TOKEN"),
         telegram_owner_id=get("TELEGRAM_OWNER_ID", int),
         database_url=get("DATABASE_URL"),
-        master_key=get("MASTER_KEY", _master_key),
+        master_key=get("MASTER_KEY", _master_key) if env.get("MASTER_KEY", "").strip() else None,
         llm_api_key=get("LLM_API_KEY"),
         model_main=model_main,
         model_browser=get("MODEL_BROWSER", default=model_main),
@@ -151,4 +150,5 @@ if __name__ == "__main__":
     print(f"  llm           : {s.llm_base_url}  main={s.model_main}  browser={s.model_browser}")
     print(f"  daily requests: {s.llm_daily_requests}")
     print(f"  temporal      : {s.temporal_address}")
+    print(f"  master key    : {'set' if s.master_key else 'NOT SET (bot and worker-agent need it)'}")
     print(f"  google oauth  : {'set' if s.google_client_id else 'not set (needed from T-19)'}")

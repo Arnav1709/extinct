@@ -27,6 +27,8 @@ async def main(queue: str) -> None:
     await db.connect(get_settings().database_url)
     client = await temporal()
     if queue == "agent":
+        if not get_settings().master_key:
+            raise SystemExit("MASTER_KEY is required for the agent worker (Gmail tokens, outbound leak check)")
         worker = Worker(client, task_queue="agent", workflows=AGENT_WORKFLOWS, activities=AGENT_ACTIVITIES)
     elif queue == "browser":
         # One browser, one task at a time. run_tool / run_approved here execute browser_task in this container.

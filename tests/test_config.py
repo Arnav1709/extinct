@@ -20,7 +20,7 @@ MINIMAL = {
 def test_empty_env_lists_every_missing_var():
     with pytest.raises(ConfigError) as e:
         load({})
-    for name in MINIMAL:
+    for name in MINIMAL.keys() - {"MASTER_KEY"}:  # optional: the browser container runs without it
         assert name in str(e.value)
 
 
@@ -76,3 +76,8 @@ def test_all_bad_values_reported_together():
     with pytest.raises(ConfigError) as e:
         load({**MINIMAL, "TELEGRAM_OWNER_ID": "x", "OWNER_TIMEZONE": "Nope/Nope"})
     assert "TELEGRAM_OWNER_ID" in str(e.value) and "OWNER_TIMEZONE" in str(e.value)
+
+
+def test_master_key_is_optional_for_the_browser_container():
+    s = load({k: v for k, v in MINIMAL.items() if k != "MASTER_KEY"})
+    assert s.master_key is None

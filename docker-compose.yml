@@ -4,17 +4,19 @@
 services:
   temporal:
     image: temporalio/temporal:1.9.1
-    # Dev server: Temporal + Web UI in one process, state in a SQLite file on the volume.
+    # Dev server, state in a SQLite file on the volume.
     command: >
       server start-dev
       --ip 0.0.0.0
       --db-filename /home/temporal/temporal.db
+      --headless
+    # --headless: no Web UI. It had no login and was reachable from the browser container (where Chrome opens
+    # untrusted pages), exposing every workflow's history. Use `docker compose exec temporal temporal ...` instead.
     volumes:
       # Mounted at the image user's home dir so the non-root "temporal" user can write to it.
       - temporal-data:/home/temporal
     ports:
       - "127.0.0.1:7233:7233"   # gRPC: workers/clients on the host (dev, tests)
-      - "127.0.0.1:8233:8233"   # Web UI
     healthcheck:
       test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "127.0.0.1:7233"]
       interval: 5s
@@ -51,6 +53,10 @@ services:
     env_file: [{ path: .env, required: false }]
     environment:
       TEMPORAL_ADDRESS: temporal:7233
+      # Chrome here opens untrusted pages: keep the keys it doesn't need out of this container.
+      MASTER_KEY: ""
+      GOOGLE_CLIENT_ID: ""
+      GOOGLE_CLIENT_SECRET: ""
     volumes:
       - browser-profile:/profile    # your logins (cookies, local storage). Never leaves this PC.
     ports:

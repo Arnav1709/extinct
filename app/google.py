@@ -8,6 +8,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 from email.message import EmailMessage
 from html.parser import HTMLParser
 
@@ -97,7 +98,9 @@ async def revoke() -> None:
     if raw:
         token = json.loads(raw).get("refresh_token") or json.loads(raw).get("token")
         async with httpx.AsyncClient(timeout=20) as client:
-            await client.post("https://oauth2.googleapis.com/revoke", params={"token": token})
+            r = await client.post("https://oauth2.googleapis.com/revoke", data={"token": token})
+        if r.status_code != 200 and "invalid_token" not in r.text:  # invalid_token: already revoked or expired
+            r.raise_for_status()  # keep the local token: the grant is still live at Google
     secret_store().delete("oauth", "google")
     await _mark("revoked")
 
@@ -199,6 +202,10 @@ def build_message(to: list[str], subject: str, body: str, sender: str = "",
     return m
 
 
+def _bare_subject(s: str) -> str:
+    return re.sub(r"^\s*((re|fwd?)\s*:\s*)+", "", s, flags=re.I).strip().lower()
+
+
 async def send_email(to: list[str], subject: str, body: str, reply_to_message_id: str | None = None) -> dict:
     svc = await service()
     thread_id, in_reply_to, refs = None, "", ""
@@ -207,8 +214,10 @@ async def send_email(to: list[str], subject: str, body: str, reply_to_message_id
                                                      metadataHeaders=["Message-ID", "References", "Subject"]))
         h = _headers(orig)
         thread_id, in_reply_to, refs = orig.get("threadId"), h.get("message-id", ""), h.get("references", "")
-        if not subject.lower().startswith("re:"):
-            subject = f"Re: {h.get('subject', subject)}"
+        # The subject is sent exactly as the user approved it (it used to be swapped for "Re: <original>").
+        # Gmail only threads a reply whose subject matches, so a different subject goes out as a new conversation.
+        if _bare_subject(subject) != _bare_subject(h.get("subject", "")):
+            thread_id = None
     raw = base64.urlsafe_b64encode(build_message(to, subject, body, "", in_reply_to, refs).as_bytes()).decode()
     payload = {"raw": raw, **({"threadId": thread_id} if thread_id else {})}
     sent = await run(svc.users().messages().send(userId="me", body=payload))
