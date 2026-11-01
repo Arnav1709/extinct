@@ -36,29 +36,23 @@ ELEMENTS_MAX = 150
 # ---------------------------------------------------------------- manager
 
 
-_internal_cache: dict[str, bool] = {}
-
-
 async def is_internal(host: str) -> bool:
-    """True for hosts on this machine or network: other containers, localhost, LAN, cloud metadata."""
+    """True for hosts on this machine or network: other containers, localhost, LAN, cloud metadata.
+    Checked on every request (no cache) and fails closed: a name we can't resolve is treated as internal."""
     host = host.lower().strip("[]")
-    if host not in _internal_cache:
+    try:
+        ips = [ipaddress.ip_address(host)]
+    except ValueError:
+        if "." not in host or host.endswith((".internal", ".local", ".localhost")):
+            return True  # compose service names (temporal, bot), localhost, host.docker.internal
         try:
-            ips = [ipaddress.ip_address(host)]
-        except ValueError:
-            if "." not in host or host.endswith((".internal", ".local", ".localhost")):
-                _internal_cache[host] = True  # compose service names (temporal, bot), localhost, host.docker.internal
-                return True
-            try:
-                infos = await asyncio.get_running_loop().getaddrinfo(host, None)
-            except OSError:
-                return False  # doesn't resolve: Chrome can't reach it either
-            ips = [ipaddress.ip_address(i[4][0].split("%")[0]) for i in infos]
-        # ponytail: cached per process and checked before Chrome resolves; a proxy that checks the connected IP
-        # would also stop DNS rebinding and redirects (route handlers don't see redirects)
-        _internal_cache[host] = any(
-            (ip.ipv4_mapped or ip if ip.version == 6 else ip).is_global is False for ip in ips)
-    return _internal_cache[host]
+            infos = await asyncio.get_running_loop().getaddrinfo(host, None)
+        except OSError:
+            return True
+        ips = [ipaddress.ip_address(i[4][0].split("%")[0]) for i in infos]
+    # ponytail: Chrome resolves again after this check, and route handlers don't see redirects; an egress proxy
+    # that checks the address actually connected to would also stop DNS rebinding and redirect tricks
+    return any(not (ip.ipv4_mapped or ip if ip.version == 6 else ip).is_global for ip in ips)
 
 
 async def _block_internal(route) -> None:
@@ -244,11 +238,13 @@ ACTION_TOOLS = [
     _fn("fail", "The goal can't be reached", {"reason": {"type": "string"}}, ["reason"]),
 ]
 READ_BLOCKED = {"type"}  # read mode can't fill in anything; the network guard below blocks submits
+READ_KEYS = {"Escape", "Tab", "PageDown", "PageUp", "Home", "End", "ArrowDown", "ArrowUp"}  # press can't type in read mode
 
 
 def _site(url: str) -> str:
-    # ponytail: last two host labels, so a.co.uk and b.co.uk count as one site; use a public-suffix list if that matters
-    return ".".join((urlsplit(url).hostname or "").lower().split(".")[-2:])
+    """Exact host (www. ignored): a.github.io and b.github.io are different sites."""
+    host = (urlsplit(url).hostname or "").lower()
+    return host[4:] if host.startswith("www.") else host
 
 
 async def _get_only(route) -> None:
@@ -267,8 +263,8 @@ def _user_message(goal, mode, step, log_lines, obs, image: bytes | None):
     lines = "\n".join(obs["elements"]) or "(no interactive elements)"
     history = "\n".join(log_lines[-15:]) or "(none yet)"
     text = (f"GOAL: {goal}\nMODE: {mode}\nSTEP: {step}/{MAX_STEPS}\n\nACTIONS SO FAR:\n{history}\n\n"
-            f"CURRENT PAGE\nURL: {obs['url']}\n"  # everything below is written by the page, so it's wrapped:
-            f"{untrusted('page', 'TITLE: ' + obs['title'] + chr(10) + chr(10) + 'ELEMENTS:' + chr(10) + lines)}\n\n"
+            f"CURRENT PAGE\n"  # everything below is controlled by the page (even its URL), so it's wrapped:
+            f"{untrusted('page', 'URL: ' + obs['url'] + chr(10) + 'TITLE: ' + obs['title'] + chr(10) + chr(10) + 'ELEMENTS:' + chr(10) + lines)}\n\n"
             f"{untrusted('page', 'VISIBLE TEXT:' + chr(10) + (obs['text'] or '(empty)'))}")
     if image is None:
         return {"role": "user", "content": text}
@@ -349,7 +345,7 @@ async def run_browser_task(goal: str, mode: str, start_url: str | None = None, m
                     want_look = True
                     log_lines.append(f"{step}: look -> screenshot attached next step")
                     continue
-                if read and name in READ_BLOCKED:
+                if read and (name in READ_BLOCKED or (name == "press" and args.get("key") not in READ_KEYS)):
                     result = "error: not allowed in read mode"
                 elif read and name == "goto" and site and _site(str(args.get("url", ""))) != site:
                     result = f"error: read mode stays on {site}; follow links on the page instead"

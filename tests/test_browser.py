@@ -265,3 +265,18 @@ async def test_browser_refuses_internal_addresses(tmp_path, monkeypatch, site):
         assert result.startswith("error:") and "BLOCKED_BY_CLIENT" in result
     finally:
         await m.close()
+
+
+def test_site_boundary_is_the_exact_host():
+    assert browser._site("https://www.example.com/a") == browser._site("https://example.com/b")
+    assert browser._site("https://victim.github.io") != browser._site("https://attacker.github.io")
+
+
+async def test_read_mode_press_cannot_type(manager, site, monkeypatch):
+    def decide(text, n):
+        return [call("press", key="a")] if n == 1 else [call("press", key="PageDown")] if n == 2 else [call("done", summary="ok")]
+
+    seen = model(monkeypatch, decide)
+    await browser.run_browser_task("x", "read", f"{site}/form.html", manager)
+    assert 'press({"key": "a"}) -> error: not allowed in read mode' in seen[1]["text"]
+    assert 'press({"key": "PageDown"}) -> ok' in seen[2]["text"]

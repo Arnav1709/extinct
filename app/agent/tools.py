@@ -285,7 +285,8 @@ async def schedule_task(ctx: ToolCtx, args: dict) -> str:
     if len((await list_tasks(ctx, {}))["tasks"]) >= MAX_TASKS:
         raise ToolError(f"there are already {MAX_TASKS} tasks or approvals waiting; cancel some first")
     task_id = f"task-{secrets.token_hex(4)}"
-    task = {"id": task_id, "kind": args["kind"], "text": args["text"]}
+    # "do" reaches here only after the user's tap (tier WO); tasks made before that rule have no marker
+    task = {"id": task_id, "kind": args["kind"], "text": args["text"], "approved": args["kind"] == "do"}
     client = await temporal()
     now = datetime.now(timezone.utc)
 

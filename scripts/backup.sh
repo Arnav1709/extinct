@@ -16,12 +16,13 @@ export MSYS_NO_PATHCONV=1  # Git Bash: don't rewrite container paths
 echo "1/3 Supabase schema app..."
 # DB=... before docker (not -e "DB=$URL"): keeps the password out of the process list
 DB="$DATABASE_URL" docker run --rm -e DB postgres:17-alpine sh -c 'pg_dump --schema=app --no-owner "$DB"' | gzip > "$DEST/app.sql.gz"
-gunzip -c "$DEST/app.sql.gz" | grep -q 'PostgreSQL database dump complete' || { echo "pg_dump failed: $DEST/app.sql.gz is incomplete"; exit 1; }
+# pg_dump writes this footer last, so it only appears at the end of a dump that finished
+gunzip -c "$DEST/app.sql.gz" | tail -n 5 | grep -q 'PostgreSQL database dump complete' || { echo "pg_dump failed: $DEST/app.sql.gz is incomplete"; exit 1; }
 
 for vol in secrets temporal-data; do
   echo "volume $vol..."
-  docker run --rm -v "extinct_$vol:/v:ro" -v "$(pwd)/$DEST:/b" alpine tar czf "/b/$vol.tgz" -C /v .
+  # streamed out and written here, so the file is yours and private (umask) even where Docker runs as root
+  docker run --rm -v "extinct_$vol:/v:ro" alpine tar czf - -C /v . > "$DEST/$vol.tgz"
 done
-chmod 600 "$DEST"/*  # the tar files are written by a container, outside our umask
 echo "Done: $DEST"
 echo "Restore: gunzip -c $DEST/app.sql.gz | psql \"\$DATABASE_URL\"  ·  volumes: tar xzf into a fresh volume (see README)."

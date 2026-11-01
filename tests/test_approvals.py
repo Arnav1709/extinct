@@ -144,3 +144,11 @@ async def test_unknown_button_choice_does_not_approve(appdb, tg, risky_tool):
     _, appr = await ask(appdb, tg, risky_tool)
     assert await activities.claim_approval({"data": f"appr:{appr['id']}:x"}) == {}
     assert (await appdb.fetchone("SELECT status FROM approvals"))["status"] == "pending"
+
+
+async def test_retried_run_tool_does_not_send_a_second_prompt(appdb, tg, risky_tool):
+    turn_id, _ = await ask(appdb, tg, risky_tool)
+    await appdb.execute("DELETE FROM tool_results")  # as if storing the result failed after the prompt was sent
+    await activities.run_tool({"turn_id": turn_id, "call": {"id": "c1", "name": "zz_send", "arguments": '{"to": "john@x.com"}'}})
+    assert (await appdb.fetchone("SELECT count(*) AS n FROM approvals"))["n"] == 1
+    assert len(tg["sent"]) == 1

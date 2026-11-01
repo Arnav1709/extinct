@@ -188,8 +188,13 @@ async def run_tool(args: dict) -> dict:
         await _store_result(turn_id, call, {"error": decision.reason}, True)
         return {"ok": False}
     if isinstance(decision, guard.NeedsApproval):
-        await guard.audit(call["name"], "needs_approval", turn_id=turn_id, tier=decision.tier)
-        await request_approval(turn_id, call["name"], decision.args, decision.summary)
+        # A retry (e.g. the prompt was sent, then storing the result failed) must not send a second prompt:
+        # two pending approvals for one call could run the action twice.
+        if not await db.fetchone(
+                "SELECT 1 FROM approvals WHERE turn_id = %s AND tool = %s AND input = %s::jsonb AND status = 'pending'",
+                (turn_id, call["name"], json.dumps(decision.args))):
+            await guard.audit(call["name"], "needs_approval", turn_id=turn_id, tier=decision.tier)
+            await request_approval(turn_id, call["name"], decision.args, decision.summary)
         await _store_result(turn_id, call, {"status": "approval_requested",
                                             "note": "Not executed yet. The user must tap the button."})
         return {"ok": True}
@@ -330,4 +335,5 @@ async def fire_task(task: dict) -> None:
         await telegram.send(f"⏰ {task['text']}")
     else:
         from app.dispatch import signal_event
-        await signal_event({"kind": "task_due", "task_id": task["id"], "text": task["text"]})
+        await signal_event({"kind": "task_due", "task_id": task["id"], "text": task["text"],
+                            "approved": task.get("approved", False)})

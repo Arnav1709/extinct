@@ -155,13 +155,13 @@ async def test_read_email_tool(appdb, monkeypatch):
 
 async def test_send_reply_threads_correctly(appdb, monkeypatch):
     svc = fake_service(monkeypatch, MSG)
-    r = await google.send_email(["ship@amazon.in"], "thanks", "Got it, thanks!", reply_to_message_id="m1")
+    r = await google.send_email(["ship@amazon.in"], "Re: Shipped!", "Got it, thanks!", reply_to_message_id="m1")
     assert r == {"sent": True, "id": "sent1", "thread_id": "t1"}
     body = [kw for name, kw in svc.log if name == "send"][0]["body"]
     mime = message_from_bytes(base64.urlsafe_b64decode(body["raw"]))
     assert body["threadId"] == "t1" and mime["In-Reply-To"] == "<abc@amazon>"
     # exactly the subject the user approved: the original email's subject must not replace it unseen
-    assert mime["Subject"] == "thanks" and mime["To"] == "ship@amazon.in"
+    assert mime["Subject"] == "Re: Shipped!" and mime["To"] == "ship@amazon.in"
 
 
 async def test_recipients_must_be_single_addresses(appdb):
@@ -198,3 +198,12 @@ async def test_send_limit(appdb, monkeypatch):
     args = {"to": ["a@b.co"], "subject": "s", "body": "b"}
     d = await guard.check("send_email", json.dumps(args), ["send_email"], approved=True)
     assert isinstance(d, guard.Denied) and "daily limit" in d.reason
+
+
+async def test_reply_with_a_different_subject_is_not_threaded(appdb, monkeypatch):
+    svc = fake_service(monkeypatch, MSG)
+    await google.send_email(["ship@amazon.in"], "Re: re: shipped!", "ok", reply_to_message_id="m1")
+    await google.send_email(["ship@amazon.in"], "Something else", "ok", reply_to_message_id="m1")
+    sends = [kw["body"] for name, kw in svc.log if name == "send"]
+    assert sends[0].get("threadId") == "t1"   # same subject (Re: and case ignored): stays in the thread
+    assert "threadId" not in sends[1]         # Gmail wouldn't thread it anyway: send as a new conversation

@@ -8,6 +8,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 from email.message import EmailMessage
 from html.parser import HTMLParser
 
@@ -201,15 +202,22 @@ def build_message(to: list[str], subject: str, body: str, sender: str = "",
     return m
 
 
+def _bare_subject(s: str) -> str:
+    return re.sub(r"^\s*((re|fwd?)\s*:\s*)+", "", s, flags=re.I).strip().lower()
+
+
 async def send_email(to: list[str], subject: str, body: str, reply_to_message_id: str | None = None) -> dict:
     svc = await service()
     thread_id, in_reply_to, refs = None, "", ""
     if reply_to_message_id:
         orig = await run(svc.users().messages().get(userId="me", id=reply_to_message_id, format="metadata",
-                                                     metadataHeaders=["Message-ID", "References"]))
+                                                     metadataHeaders=["Message-ID", "References", "Subject"]))
         h = _headers(orig)
         thread_id, in_reply_to, refs = orig.get("threadId"), h.get("message-id", ""), h.get("references", "")
         # The subject is sent exactly as the user approved it (it used to be swapped for "Re: <original>").
+        # Gmail only threads a reply whose subject matches, so a different subject goes out as a new conversation.
+        if _bare_subject(subject) != _bare_subject(h.get("subject", "")):
+            thread_id = None
     raw = base64.urlsafe_b64encode(build_message(to, subject, body, "", in_reply_to, refs).as_bytes()).decode()
     payload = {"raw": raw, **({"threadId": thread_id} if thread_id else {})}
     sent = await run(svc.users().messages().send(userId="me", body=payload))
